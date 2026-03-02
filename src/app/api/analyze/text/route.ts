@@ -1,6 +1,7 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { computeBERTScore, isBERTScoreAvailable } from "@/lib/bertscore";
 
 // Initialize Gemini
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
@@ -23,6 +24,12 @@ interface AnalysisResult {
     emotionalLanguage: string[];
     capsUsage: number;
   };
+  bertScores?: Array<{
+    claim: string;
+    reference: string;
+    similarity: number;
+    interpretation: "supports" | "contradicts" | "unrelated";
+  }>;
   summary: string;
 }
 
@@ -256,19 +263,32 @@ Return JSON only:
       console.log("Parsed claims:", parsed.factVerification?.length || 0);
 
       // Calculate truth score based on verified claims
-      const claims = parsed.factVerification || [];
+      const claims = (parsed.factVerification || []).map(
+        (c: { claim: string; status: string; source: string }) => ({
+          ...c,
+          status: c.status?.toLowerCase().trim(),
+        }),
+      );
       const trueClaims = claims.filter(
         (c: { status: string }) => c.status === "true",
       ).length;
       const falseClaims = claims.filter(
         (c: { status: string }) => c.status === "false",
       ).length;
-      const totalVerifiable = trueClaims + falseClaims;
+      const totalClaims = claims.length;
 
-      let calculatedScore = parsed.truthScore;
-      if (totalVerifiable > 0) {
-        calculatedScore = Math.round((trueClaims / totalVerifiable) * 100);
+      // ALWAYS calculate score from claims — never trust Gemini's raw score
+      let calculatedScore: number;
+      if (totalClaims === 0) {
+        calculatedScore = 50; // no claims = uncertain
+      } else if (falseClaims === totalClaims) {
+        calculatedScore = 0; // all false = 0
+      } else {
+        calculatedScore = Math.round((trueClaims / totalClaims) * 100);
       }
+      console.log(
+        `Score calc: ${trueClaims} true, ${falseClaims} false, ${totalClaims} total → ${calculatedScore}`,
+      );
 
       // Generate issues from false claims
       const detectedIssues = claims
@@ -304,17 +324,39 @@ Return JSON only:
         verdict = "Unverifiable Claims";
       }
 
+      // Compute BERTScore for each claim-reference pair
+      let bertScores;
+      if (isBERTScoreAvailable() && claims.length > 0) {
+        try {
+          const pairs = claims
+            .filter((c: { source: string }) => c.source)
+            .map((c: { claim: string; source: string }) => ({
+              claim: c.claim,
+              reference: c.source,
+            }));
+
+          if (pairs.length > 0) {
+            bertScores = await computeBERTScore(pairs);
+            console.log("BERTScore results:", JSON.stringify(bertScores));
+          }
+        } catch (bertErr) {
+          console.error("BERTScore failed (non-critical):", bertErr);
+          // Continue without BERTScore — it's an enhancement, not required
+        }
+      }
+
       return {
         truthScore: calculatedScore,
         confidenceLevel: Math.min(95, calculatedScore + 5),
         verdict,
         detectedIssues,
-        factVerification: parsed.factVerification || [],
+        factVerification: claims,
         sentimentAnalysis: parsed.sentimentAnalysis || {
           tone: "Factual Analysis",
           emotionalLanguage: [],
           capsUsage: 0,
         },
+        ...(bertScores && { bertScores }),
         summary:
           parsed.summary ||
           `Analysis complete. ${trueClaims} claim(s) verified as true, ${falseClaims} claim(s) identified as false.`,
@@ -349,34 +391,97 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Perform analysis
-    let analysis: AnalysisResult;
-
+    // Try ML model first, then Gemini fallback
     console.log("=== TEXT ANALYSIS REQUEST ===");
     console.log("Text length:", text.length);
-    console.log("GEMINI_API_KEY exists:", !!process.env.GEMINI_API_KEY);
-    console.log(
-      "GEMINI_API_KEY value (first 10 chars):",
-      process.env.GEMINI_API_KEY?.substring(0, 10),
-    );
 
-    // Check if API key is configured
-    if (
-      !process.env.GEMINI_API_KEY ||
-      process.env.GEMINI_API_KEY === "your_gemini_api_key_here"
-    ) {
-      return NextResponse.json(
-        {
-          error:
-            "GEMINI_API_KEY is not configured. Please add your API key to .env.local",
-        },
-        { status: 500 },
+    let analysis: AnalysisResult;
+    let usedMLModel = false;
+
+    // Step 1: Try Python ML Service
+    try {
+      console.log("Trying ML model at http://localhost:8000...");
+      const mlResponse = await fetch("http://localhost:8000/predict/text", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+        signal: AbortSignal.timeout(10000),
+      });
+
+      if (mlResponse.ok) {
+        const mlResult = await mlResponse.json();
+        console.log("ML model result:", JSON.stringify(mlResult));
+
+        if (mlResult.confidence >= 0.65) {
+          // ML model is confident — use its result
+          const isFake = mlResult.label === "fake";
+          const truthScore = isFake
+            ? Math.round((1 - mlResult.confidence) * 100)
+            : Math.round(mlResult.confidence * 100);
+
+          analysis = {
+            truthScore,
+            confidenceLevel: Math.round(mlResult.confidence * 100),
+            verdict: isFake ? "Likely Fake/Manipulated" : "Verified",
+            detectedIssues: isFake
+              ? [
+                  {
+                    text: `ML model classified this as fake news with ${Math.round(mlResult.confidence * 100)}% confidence`,
+                    severity: "high" as const,
+                  },
+                ]
+              : [
+                  {
+                    text: `ML model classified this as real news with ${Math.round(mlResult.confidence * 100)}% confidence`,
+                    severity: "low" as const,
+                  },
+                ],
+            factVerification: [],
+            sentimentAnalysis: {
+              tone: isFake ? "Potentially Misleading" : "Factual",
+              emotionalLanguage: [],
+              capsUsage: 0,
+            },
+            summary: `ML model analysis: ${mlResult.label} (confidence: ${Math.round(mlResult.confidence * 100)}%). Probabilities: fake=${Math.round((mlResult.probabilities?.fake || 0) * 100)}%, real=${Math.round((mlResult.probabilities?.real || 0) * 100)}%.`,
+          };
+          usedMLModel = true;
+          console.log(
+            "Using ML model result. Truth score:",
+            analysis.truthScore,
+          );
+        } else {
+          console.log(
+            `ML confidence too low (${mlResult.confidence}), falling back to Gemini`,
+          );
+        }
+      }
+    } catch (mlError) {
+      console.log(
+        "ML service unavailable, falling back to Gemini:",
+        mlError instanceof Error ? mlError.message : mlError,
       );
     }
 
-    console.log("Using Gemini API for analysis");
-    analysis = await performGeminiAnalysis(text);
-    console.log("Analysis complete. Truth score:", analysis.truthScore);
+    // Step 2: Gemini fallback if ML model wasn't used
+    if (!usedMLModel) {
+      if (
+        !process.env.GEMINI_API_KEY ||
+        process.env.GEMINI_API_KEY === "your_gemini_api_key_here"
+      ) {
+        return NextResponse.json(
+          {
+            error:
+              "Neither ML service nor Gemini API is available. Start the ML service with: cd ml_service && python app.py",
+          },
+          { status: 500 },
+        );
+      }
+
+      console.log("Using Gemini API for analysis");
+      analysis = await performGeminiAnalysis(text);
+    }
+
+    console.log("Analysis complete. Truth score:", analysis!.truthScore);
 
     // Try to save to database if user is authenticated
     try {
@@ -391,12 +496,12 @@ export async function POST(request: NextRequest) {
           user_id: user.id,
           content_type: "text",
           content_preview: text.substring(0, 200),
-          truth_score: analysis.truthScore,
-          verdict: analysis.verdict,
-          detected_issues: analysis.detectedIssues,
-          fact_verification: analysis.factVerification,
-          sentiment_analysis: analysis.sentimentAnalysis,
-          summary: analysis.summary,
+          truth_score: analysis!.truthScore,
+          verdict: analysis!.verdict,
+          detected_issues: analysis!.detectedIssues,
+          fact_verification: analysis!.factVerification,
+          sentiment_analysis: analysis!.sentimentAnalysis,
+          summary: analysis!.summary,
         });
 
         // Increment verification count
@@ -409,7 +514,7 @@ export async function POST(request: NextRequest) {
       // Continue without saving - analysis still works
     }
 
-    return NextResponse.json(analysis);
+    return NextResponse.json(analysis!);
   } catch (error) {
     console.error("Analysis error:", error);
     const errorMessage =

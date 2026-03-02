@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import styles from "./page.module.css";
 
-type TabType = "upload" | "text" | "url";
+type TabType = "upload" | "text" | "url" | "video";
 
 export default function UploadPage() {
   const router = useRouter();
@@ -16,6 +16,7 @@ export default function UploadPage() {
   const [urlContent, setUrlContent] = useState("");
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [videoFile, setVideoFile] = useState<File | null>(null);
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -50,9 +51,26 @@ export default function UploadPage() {
     }
   };
 
-  const isValidFileType = (file: File) => {
+  const isValidFileType = (f: File) => {
     const validTypes = ["image/jpeg", "image/png", "image/webp"];
-    return validTypes.includes(file.type);
+    return validTypes.includes(f.type);
+  };
+
+  const handleVideoSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const selected = e.target.files?.[0];
+    if (selected) {
+      const validVideoTypes = [
+        "video/mp4",
+        "video/webm",
+        "video/avi",
+        "video/quicktime",
+      ];
+      if (validVideoTypes.includes(selected.type)) {
+        setVideoFile(selected);
+      } else {
+        alert("Unsupported video format. Use MP4, WEBM, AVI, or MOV.");
+      }
+    }
   };
 
   const handleAnalyze = async () => {
@@ -99,14 +117,41 @@ export default function UploadPage() {
           throw new Error(analysisResult.error);
         }
       } else if (activeTab === "url") {
-        // For URL, we'll fetch the content and analyze as text
-        // In production, you'd have a dedicated URL scraping endpoint
-        analysisResult = {
-          truthScore: 75,
-          verdict: "URL Analysis",
-          summary:
-            "URL analysis requires additional implementation for content scraping.",
-        };
+        // Call URL analysis API
+        const response = await fetch("/api/analyze/url", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url: urlContent }),
+        });
+
+        analysisResult = await response.json();
+
+        if (!response.ok) {
+          throw new Error(analysisResult.error || "URL analysis failed");
+        }
+
+        if (analysisResult.error) {
+          throw new Error(analysisResult.error);
+        }
+      } else if (activeTab === "video" && videoFile) {
+        // Call video analysis API
+        const formData = new FormData();
+        formData.append("video", videoFile);
+
+        const response = await fetch("/api/analyze/video", {
+          method: "POST",
+          body: formData,
+        });
+
+        analysisResult = await response.json();
+
+        if (!response.ok) {
+          throw new Error(analysisResult.error || "Video analysis failed");
+        }
+
+        if (analysisResult.error) {
+          throw new Error(analysisResult.error);
+        }
       }
 
       // Store analysis result for results page
@@ -118,13 +163,16 @@ export default function UploadPage() {
           ? textContent
           : activeTab === "upload"
             ? file?.name || ""
-            : urlContent,
+            : activeTab === "video"
+              ? videoFile?.name || ""
+              : urlContent,
       );
 
       router.push("/results");
     } catch (error) {
       console.error("Analysis error:", error);
-      alert("Failed to analyze content. Please try again.");
+      const msg = error instanceof Error ? error.message : "Unknown error";
+      alert(msg);
     } finally {
       setIsAnalyzing(false);
     }
@@ -138,6 +186,8 @@ export default function UploadPage() {
         return textContent.trim().length > 10;
       case "url":
         return urlContent.trim().length > 0 && urlContent.includes(".");
+      case "video":
+        return videoFile !== null;
       default:
         return false;
     }
@@ -168,9 +218,7 @@ export default function UploadPage() {
           Upload Content for{" "}
           <span className={styles.textPrimary}>Verification</span>
         </h1>
-        <p className={styles.subtitle}>
-          Support for text and images (JPG/PNG/WEBP)
-        </p>
+        <p className={styles.subtitle}>Support for text, images, and videos</p>
 
         {/* Tabs */}
         <div className={styles.tabs}>
@@ -218,6 +266,21 @@ export default function UploadPage() {
               />
             </svg>
             URL
+          </button>
+          <button
+            className={`${styles.tab} ${activeTab === "video" ? styles.active : ""}`}
+            onClick={() => setActiveTab("video")}
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+              <path
+                d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+            Video
           </button>
         </div>
 
@@ -346,6 +409,91 @@ export default function UploadPage() {
             <p className={styles.urlHelp}>
               Enter the URL of a news article or webpage to analyze its content
             </p>
+          </div>
+        )}
+
+        {/* Video Tab Content */}
+        {activeTab === "video" && (
+          <div className={styles.textInputContainer}>
+            {videoFile ? (
+              <div className={styles.filePreview}>
+                <div className={styles.fileInfo}>
+                  <svg
+                    width="48"
+                    height="48"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    style={{ color: "var(--color-primary)" }}
+                  >
+                    <path
+                      d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                  <span className={styles.fileName}>{videoFile.name}</span>
+                  <span className={styles.fileSize}>
+                    {(videoFile.size / 1024 / 1024).toFixed(2)} MB
+                  </span>
+                </div>
+                <button
+                  className={styles.clearFile}
+                  onClick={() => setVideoFile(null)}
+                >
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+                    <path
+                      d="M6 18L18 6M6 6l12 12"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                </button>
+              </div>
+            ) : (
+              <>
+                <div className={styles.dropzoneIcons}>
+                  <div className={styles.iconWrapper}>
+                    <svg width="48" height="48" viewBox="0 0 24 24" fill="none">
+                      <path
+                        d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
+                  </div>
+                </div>
+                <p className={styles.dropzoneText}>
+                  Upload a video for deepfake analysis
+                </p>
+                <p className={styles.dropzoneSubtext}>
+                  Supports MP4, WEBM, AVI, MOV (max 50MB)
+                </p>
+                <label className={styles.chooseFileBtn}>
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+                    <path
+                      d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                  Choose Video
+                  <input
+                    type="file"
+                    accept=".mp4,.webm,.avi,.mov"
+                    onChange={handleVideoSelect}
+                    className={styles.fileInput}
+                  />
+                </label>
+              </>
+            )}
           </div>
         )}
 

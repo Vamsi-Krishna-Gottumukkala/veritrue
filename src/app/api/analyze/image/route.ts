@@ -43,7 +43,6 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Validate file type
     const validTypes = ["image/jpeg", "image/png", "image/webp"];
     if (!validTypes.includes(file.type)) {
       return NextResponse.json(
@@ -52,7 +51,6 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Check file size (max 10MB)
     if (file.size > 10 * 1024 * 1024) {
       return NextResponse.json(
         { error: "File too large. Max size: 10MB" },
@@ -60,34 +58,107 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Check if API key is configured
-    if (
-      !process.env.GEMINI_API_KEY ||
-      process.env.GEMINI_API_KEY === "your_gemini_api_key_here"
-    ) {
-      return NextResponse.json(
-        {
-          error:
-            "GEMINI_API_KEY is not configured. Please add your API key to .env.local",
-        },
-        { status: 500 },
-      );
-    }
-
-    // Get file buffer
     const buffer = await file.arrayBuffer();
     const bytes = new Uint8Array(buffer);
     const base64Image = Buffer.from(buffer).toString("base64");
 
-    // Perform Gemini Vision analysis
-    const analysis = await performGeminiVisionAnalysis(
-      base64Image,
-      file.type,
-      bytes,
-      file.size,
-    );
+    let analysis: ImageAnalysisResult;
+    let usedMLModel = false;
 
-    // Try to save to database if user is authenticated
+    // Step 1: Try Python ML Service
+    try {
+      console.log("Trying ML image model at http://localhost:8000...");
+      const mlFormData = new FormData();
+      mlFormData.append("file", file);
+
+      const mlResponse = await fetch("http://localhost:8000/predict/image", {
+        method: "POST",
+        body: mlFormData,
+        signal: AbortSignal.timeout(15000),
+      });
+
+      if (mlResponse.ok) {
+        const mlResult = await mlResponse.json();
+        console.log("ML image result:", JSON.stringify(mlResult));
+
+        if (mlResult.confidence >= 0.7) {
+          const isFake = mlResult.label === "fake";
+          const truthScore = isFake
+            ? Math.round((1 - mlResult.confidence) * 100)
+            : Math.round(mlResult.confidence * 100);
+
+          analysis = {
+            truthScore,
+            confidenceLevel: Math.round(mlResult.confidence * 100),
+            verdict: isFake ? "AI-Generated / Fake Image" : "Authentic Image",
+            detectedIssues: isFake
+              ? [
+                  {
+                    text: `ML model detected this as a fake/AI-generated image (${Math.round(mlResult.confidence * 100)}% confidence)`,
+                    severity: "high" as const,
+                  },
+                ]
+              : [
+                  {
+                    text: `ML model classified this as a real image (${Math.round(mlResult.confidence * 100)}% confidence)`,
+                    severity: "low" as const,
+                  },
+                ],
+            factVerification: [],
+            metadata: {
+              format: file.type,
+              fileSize: file.size,
+              hasExif: false,
+            },
+            sentimentAnalysis: {
+              tone: isFake ? "AI-Generated Content" : "Authentic",
+              emotionalLanguage: [],
+              capsUsage: 0,
+            },
+            summary: `ML model analysis: ${mlResult.label} (confidence: ${Math.round(mlResult.confidence * 100)}%). Probabilities: fake=${Math.round((mlResult.probabilities?.fake || 0) * 100)}%, real=${Math.round((mlResult.probabilities?.real || 0) * 100)}%.`,
+          };
+          usedMLModel = true;
+          console.log(
+            "Using ML image result. Truth score:",
+            analysis.truthScore,
+          );
+        } else {
+          console.log(
+            `ML image confidence too low (${mlResult.confidence}), falling back to Gemini`,
+          );
+        }
+      }
+    } catch (mlError) {
+      console.log(
+        "ML image service unavailable:",
+        mlError instanceof Error ? mlError.message : mlError,
+      );
+    }
+
+    // Step 2: Gemini fallback
+    if (!usedMLModel) {
+      if (
+        !process.env.GEMINI_API_KEY ||
+        process.env.GEMINI_API_KEY === "your_gemini_api_key_here"
+      ) {
+        return NextResponse.json(
+          {
+            error:
+              "Neither ML service nor Gemini API is available. Start the ML service with: cd ml_service && python app.py",
+          },
+          { status: 500 },
+        );
+      }
+
+      analysis = await performGeminiVisionAnalysis(
+        base64Image,
+        file.type,
+        bytes,
+        file.size,
+      );
+    }
+
+    // Save to DB if authenticated
     try {
       const supabase = await createClient();
       const {
@@ -99,12 +170,12 @@ export async function POST(request: NextRequest) {
           user_id: user.id,
           content_type: "image",
           content_preview: `Image: ${file.name} (${(file.size / 1024).toFixed(1)}KB)`,
-          truth_score: analysis.truthScore,
-          verdict: analysis.verdict,
-          detected_issues: analysis.detectedIssues,
-          fact_verification: analysis.factVerification,
-          sentiment_analysis: analysis.sentimentAnalysis,
-          summary: analysis.summary,
+          truth_score: analysis!.truthScore,
+          verdict: analysis!.verdict,
+          detected_issues: analysis!.detectedIssues,
+          fact_verification: analysis!.factVerification,
+          sentiment_analysis: analysis!.sentimentAnalysis,
+          summary: analysis!.summary,
         });
 
         await supabase.rpc("increment_verification_count", {
@@ -115,7 +186,7 @@ export async function POST(request: NextRequest) {
       console.error("Database error (non-critical):", dbError);
     }
 
-    return NextResponse.json(analysis);
+    return NextResponse.json(analysis!);
   } catch (error) {
     console.error("Image analysis error:", error);
     const errorMessage =
@@ -133,20 +204,48 @@ async function performGeminiVisionAnalysis(
   bytes: Uint8Array,
   fileSize: number,
 ): Promise<ImageAnalysisResult> {
-  console.log("Starting Gemini Vision analysis...");
+  console.log("Starting Gemini Vision forensic analysis...");
 
   const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
-  const prompt = `Analyze this image for authenticity and manipulation. Check for:
-1. Signs of digital manipulation (splicing, cloning, airbrushing)
-2. AI-generated content indicators
-3. Misleading context (text overlays, altered captions)
-4. Any visible text claims that can be fact-checked
+  // Forensic-focused prompt designed to detect AI-generated and manipulated images
+  const prompt = `You are an expert digital forensics analyst specializing in detecting AI-generated and manipulated images. Perform a thorough forensic analysis of this image.
+
+CHECK FOR THESE AI-GENERATION ARTIFACTS:
+- Hands/fingers: wrong count, fused, extra, missing, unnatural bending
+- Eyes: mismatched iris patterns, asymmetric reflections, unnatural catchlights
+- Teeth: fused, too uniform, floating, wrong count
+- Hair: merging into skin, unnatural strand patterns, impossible physics
+- Text in image: garbled, misspelled, nonsensical letters
+- Skin: waxy/plastic texture, lack of pores, overly smooth
+- Background: warped lines, melting objects, impossible geometry
+- Symmetry: faces too perfectly symmetric (real faces are asymmetric)
+- Lighting: inconsistent shadows, light from multiple impossible directions
+- Edges: unusual blending between subject and background
+- Patterns: repeating textures that tile unnaturally
+- Overall "uncanny valley" feel or hyperrealistic perfection
+
+CHECK FOR MANIPULATION (PHOTOSHOP/EDITING):
+- Clone stamp artifacts (repeated identical patches)
+- Inconsistent noise/grain across regions
+- Mismatched compression levels
+- Cut-paste edges with halo artifacts
+- Warped straight lines near edited areas (liquify tool)
+- Color/lighting mismatches between composited elements
+
+ALSO CHECK:
+- Any visible text claims that can be fact-checked
+- Whether this is a screenshot of social media (could be fabricated)
+
+Based on your analysis, determine:
+1. Is this image AI-generated? (yes/no/uncertain)
+2. Is this image manipulated/edited? (yes/no/uncertain)
+3. What specific artifacts did you find?
 
 Return JSON only:
-{"detectedIssues":[{"text":"description","severity":"high|medium|low"}],"factVerification":[{"claim":"any text claim in image","status":"true|false|disputed","source":"reason"}],"truthScore":0-100,"verdict":"verdict","summary":"1-2 sentences","isAIGenerated":false,"manipulationSigns":[],"tone":"Neutral"}`;
+{"isAIGenerated":"yes|no|uncertain","isManipulated":"yes|no|uncertain","aiConfidence":0-100,"artifacts":["specific artifact found"],"detectedIssues":[{"text":"description","severity":"high|medium|low"}],"factVerification":[{"claim":"text claim in image","status":"true|false|disputed","source":"reason"}],"truthScore":0-100,"verdict":"short verdict","summary":"2-3 sentence forensic summary"}`;
 
-  // Retry logic for rate limits
+  // Retry logic
   let result;
   let retryCount = 0;
   while (retryCount < 3) {
@@ -184,7 +283,7 @@ Return JSON only:
   const response = result.response.text();
   console.log("Gemini Vision response:", response.substring(0, 500));
 
-  // Extract JSON from response
+  // Extract JSON
   let jsonString = response;
   const codeBlockMatch =
     response.match(/```json\s*([\s\S]*?)\s*```/) ||
@@ -202,51 +301,88 @@ Return JSON only:
   try {
     const parsed = JSON.parse(jsonString);
 
-    // Extract metadata from bytes
     const metadata = extractBasicMetadata(bytes, mimeType, fileSize);
-
-    // Calculate truth score from issues
-    let truthScore = parsed.truthScore ?? 85;
-    const detectedIssues = parsed.detectedIssues || [];
+    const detectedIssues: ImageAnalysisResult["detectedIssues"] =
+      parsed.detectedIssues || [];
     const factVerification = parsed.factVerification || [];
+    let truthScore = parsed.truthScore ?? 75;
 
-    // Adjust score based on metadata checks
-    if (!metadata.hasExif && mimeType === "image/jpeg") {
-      if (
-        !detectedIssues.some((i: { text: string }) => i.text.includes("EXIF"))
-      ) {
-        detectedIssues.push({
-          text: "No EXIF metadata found — may be a screenshot or processed image",
-          severity: "low" as const,
+    // ---- AI-generation scoring ----
+    const isAI = parsed.isAIGenerated?.toLowerCase();
+    const aiConfidence = parsed.aiConfidence ?? 50;
+
+    if (isAI === "yes") {
+      truthScore = Math.min(truthScore, Math.max(5, 100 - aiConfidence));
+      detectedIssues.unshift({
+        text: `AI-GENERATED IMAGE DETECTED (${aiConfidence}% confidence)`,
+        severity: "high" as const,
+      });
+      // Add specific artifacts found
+      if (parsed.artifacts && parsed.artifacts.length > 0) {
+        parsed.artifacts.forEach((artifact: string) => {
+          detectedIssues.push({
+            text: `AI artifact: ${artifact}`,
+            severity: "medium" as const,
+          });
         });
       }
+    } else if (isAI === "uncertain") {
+      truthScore = Math.min(truthScore, 60);
+      detectedIssues.unshift({
+        text: `Possibly AI-generated — some indicators present (${aiConfidence}% confidence)`,
+        severity: "medium" as const,
+      });
     }
 
-    if (parsed.isAIGenerated) {
-      truthScore = Math.min(truthScore, 30);
+    // ---- Manipulation scoring ----
+    const isManipulated = parsed.isManipulated?.toLowerCase();
+    if (isManipulated === "yes") {
+      truthScore = Math.min(truthScore, 35);
       if (
-        !detectedIssues.some((i: { text: string }) =>
-          i.text.toLowerCase().includes("ai"),
-        )
+        !detectedIssues.some((i) => i.text.toLowerCase().includes("manipulat"))
       ) {
-        detectedIssues.push({
-          text: "Image appears to be AI-generated",
+        detectedIssues.unshift({
+          text: "Image shows signs of digital manipulation/editing",
           severity: "high" as const,
+        });
+      }
+    } else if (isManipulated === "uncertain") {
+      truthScore = Math.min(truthScore, 65);
+    }
+
+    // ---- Metadata scoring ----
+    if (!metadata.hasExif && mimeType === "image/jpeg") {
+      if (!detectedIssues.some((i) => i.text.includes("EXIF"))) {
+        detectedIssues.push({
+          text: "No EXIF metadata — may be a screenshot or processed image",
+          severity: "low" as const,
         });
       }
     }
 
     truthScore = Math.max(5, Math.min(100, truthScore));
 
-    let verdict = parsed.verdict || "Authentic Image";
-    if (truthScore < 30) verdict = "Likely Fake / AI-Generated";
-    else if (truthScore < 50) verdict = "Likely Manipulated";
-    else if (truthScore < 70) verdict = "Potentially Edited";
-    else if (truthScore < 85) verdict = "Minor Edits Possible";
+    // Determine verdict
+    let verdict: string;
+    if (isAI === "yes" && aiConfidence > 70) {
+      verdict = "AI-Generated Image";
+    } else if (isAI === "yes") {
+      verdict = "Likely AI-Generated";
+    } else if (isManipulated === "yes") {
+      verdict = "Digitally Manipulated";
+    } else if (isAI === "uncertain" || isManipulated === "uncertain") {
+      verdict = "Suspicious — Needs Further Review";
+    } else if (truthScore >= 85) {
+      verdict = "Authentic Image";
+    } else if (truthScore >= 70) {
+      verdict = "Likely Authentic";
+    } else {
+      verdict = parsed.verdict || "Inconclusive";
+    }
 
     if (detectedIssues.length === 0) {
       detectedIssues.push({
-        text: "No obvious signs of manipulation detected",
+        text: "No signs of AI generation or manipulation detected",
         severity: "low" as const,
       });
     }
@@ -259,13 +395,13 @@ Return JSON only:
       factVerification,
       metadata,
       sentimentAnalysis: {
-        tone: parsed.tone || "Neutral",
-        emotionalLanguage: parsed.manipulationSigns || [],
+        tone: isAI === "yes" ? "AI-Generated Content" : "Visual Media",
+        emotionalLanguage: parsed.artifacts || [],
         capsUsage: 0,
       },
       summary:
         parsed.summary ||
-        `Image analysis complete. Truth score: ${truthScore}%.`,
+        `Image forensic analysis complete. Truth score: ${truthScore}%.`,
     };
   } catch (parseError) {
     throw new Error(
@@ -285,7 +421,6 @@ function extractBasicMetadata(
     hasExif: false,
   };
 
-  // Check for EXIF data in JPEG
   if (mimeType === "image/jpeg") {
     for (let i = 0; i < Math.min(bytes.length, 100); i++) {
       if (bytes[i] === 0xff && bytes[i + 1] === 0xe1) {

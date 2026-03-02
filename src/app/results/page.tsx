@@ -22,6 +22,12 @@ interface AnalysisResult {
     emotionalLanguage: string[];
     capsUsage: number;
   };
+  bertScores?: Array<{
+    claim: string;
+    reference: string;
+    similarity: number;
+    interpretation: "supports" | "contradicts" | "unrelated";
+  }>;
   summary: string;
 }
 
@@ -177,6 +183,7 @@ export default function ResultsPage() {
             emotionalLanguage: ["None detected"],
             capsUsage: 0,
           },
+          ...(parsed.bertScores && { bertScores: parsed.bertScores }),
           summary: parsed.summary || "Analysis completed.",
         };
         setResult(analysis);
@@ -454,6 +461,73 @@ export default function ResultsPage() {
                   </div>
                   <span className={styles.factSource}>
                     Source: {fact.source}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* BERTScore Semantic Analysis */}
+        {result.bertScores && result.bertScores.length > 0 && (
+          <div className={styles.card}>
+            <h2 className={styles.cardTitle}>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+                <path
+                  d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+              BERTScore — Semantic Analysis
+            </h2>
+            <div className={styles.factsList}>
+              {result.bertScores.map((bs, index) => (
+                <div key={index} className={styles.factItem}>
+                  <div className={styles.factClaim}>
+                    <span className={styles.factText}>{bs.claim}</span>
+                    <span
+                      className={`${styles.factBadge} ${
+                        bs.interpretation === "supports"
+                          ? styles.badgeTrue
+                          : bs.interpretation === "contradicts"
+                            ? styles.badgeFalse
+                            : styles.badgeDisputed
+                      }`}
+                    >
+                      {bs.interpretation}
+                    </span>
+                  </div>
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "0.75rem",
+                      marginTop: "0.5rem",
+                    }}
+                  >
+                    <div className={styles.capsBar} style={{ flex: 1 }}>
+                      <div
+                        className={styles.capsFill}
+                        style={{
+                          width: `${Math.round(bs.similarity * 100)}%`,
+                          background:
+                            bs.similarity > 0.75
+                              ? "var(--color-success)"
+                              : bs.similarity > 0.4
+                                ? "var(--color-warning)"
+                                : "var(--color-error)",
+                        }}
+                      ></div>
+                      <span className={styles.capsPercent}>
+                        {Math.round(bs.similarity * 100)}% similarity
+                      </span>
+                    </div>
+                  </div>
+                  <span className={styles.factSource}>
+                    Reference: {bs.reference}
                   </span>
                 </div>
               ))}
