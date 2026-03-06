@@ -41,7 +41,10 @@ export default function Header() {
         </Link>
 
         <nav className={styles.nav}>
-          <Link href="/#how-it-works" className={styles.navLink}>
+          <Link
+            href="/how-it-works"
+            className={`${styles.navLink} ${pathname === "/how-it-works" ? styles.active : ""}`}
+          >
             How It Works
           </Link>
           <Link href="/api-docs" className={styles.navLink}>

@@ -9,7 +9,7 @@ type TabType = "upload" | "text" | "url" | "video";
 
 export default function UploadPage() {
   const router = useRouter();
-  const [activeTab, setActiveTab] = useState<TabType>("upload");
+  const [activeTab, setActiveTab] = useState<TabType>("text");
   const [isDragging, setIsDragging] = useState(false);
   const [file, setFile] = useState<File | null>(null);
   const [textContent, setTextContent] = useState("");
@@ -223,21 +223,6 @@ export default function UploadPage() {
         {/* Tabs */}
         <div className={styles.tabs}>
           <button
-            className={`${styles.tab} ${activeTab === "upload" ? styles.active : ""}`}
-            onClick={() => setActiveTab("upload")}
-          >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-              <path
-                d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            </svg>
-            Upload
-          </button>
-          <button
             className={`${styles.tab} ${activeTab === "text" ? styles.active : ""}`}
             onClick={() => setActiveTab("text")}
           >
@@ -253,19 +238,19 @@ export default function UploadPage() {
             Text
           </button>
           <button
-            className={`${styles.tab} ${activeTab === "url" ? styles.active : ""}`}
-            onClick={() => setActiveTab("url")}
+            className={`${styles.tab} ${activeTab === "upload" ? styles.active : ""}`}
+            onClick={() => setActiveTab("upload")}
           >
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
               <path
-                d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"
+                d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"
                 stroke="currentColor"
                 strokeWidth="2"
                 strokeLinecap="round"
                 strokeLinejoin="round"
               />
             </svg>
-            URL
+            Upload
           </button>
           <button
             className={`${styles.tab} ${activeTab === "video" ? styles.active : ""}`}
@@ -281,6 +266,21 @@ export default function UploadPage() {
               />
             </svg>
             Video
+          </button>
+          <button
+            className={`${styles.tab} ${activeTab === "url" ? styles.active : ""}`}
+            onClick={() => setActiveTab("url")}
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+              <path
+                d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+            URL
           </button>
         </div>
 
