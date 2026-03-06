@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { cookies } from "next/headers";
 import { pool } from "@/lib/db";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
@@ -50,10 +51,20 @@ export async function POST(req: Request) {
       { expiresIn: "7d" },
     );
 
+    // 4. Set HTTP-only cookie
+    const cookieStore = await cookies();
+    cookieStore.set({
+      name: "auth_token",
+      value: token,
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      maxAge: 60 * 60 * 24 * 7, // 7 days
+      path: "/",
+    });
+
     return NextResponse.json({
       message: "Login successful",
       user: { id: user.id, email: user.email, fullName: user.full_name },
-      token,
     });
   } catch (error) {
     console.error("Signin error:", error);

@@ -1,11 +1,42 @@
 "use client";
 
+import { useState, useEffect } from "react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import styles from "./Header.module.css";
 
 export default function Header() {
   const pathname = usePathname();
+  const router = useRouter();
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+
+  useEffect(() => {
+    const checkAuth = async () => {
+      try {
+        const res = await fetch("/api/auth/me");
+        if (res.ok) {
+          const data = await res.json();
+          setIsAuthenticated(data.authenticated);
+        } else {
+          setIsAuthenticated(false);
+        }
+      } catch (err) {
+        setIsAuthenticated(false);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+    checkAuth();
+  }, [pathname]); // Re-check on route change
+
+  const handleSignOut = async () => {
+    await fetch("/api/auth/signout", { method: "POST" });
+    setIsAuthenticated(false);
+    sessionStorage.removeItem("auth_token");
+    router.push("/");
+    router.refresh();
+  };
 
   return (
     <header className={styles.header}>
@@ -41,6 +72,7 @@ export default function Header() {
         </Link>
 
         <nav className={styles.nav}>
+          {/* Always show these links */}
           <Link
             href="/how-it-works"
             className={`${styles.navLink} ${pathname === "/how-it-works" ? styles.active : ""}`}
@@ -56,9 +88,35 @@ export default function Header() {
           >
             Pricing
           </Link>
-          <Link href="/auth/signin" className={styles.signInBtn}>
-            Sign In
-          </Link>
+
+          {/* Conditional Auth Links */}
+          {!isLoading && (
+            <>
+              {isAuthenticated ? (
+                <>
+                  <Link
+                    href="/upload"
+                    className={`${styles.navLink} ${pathname === "/upload" ? styles.active : ""}`}
+                  >
+                    Upload
+                  </Link>
+                  <Link
+                    href="/history"
+                    className={`${styles.navLink} ${pathname === "/history" ? styles.active : ""}`}
+                  >
+                    History
+                  </Link>
+                  <button onClick={handleSignOut} className={styles.signInBtn}>
+                    Sign Out
+                  </button>
+                </>
+              ) : (
+                <Link href="/auth/signin" className={styles.signInBtn}>
+                  Sign In
+                </Link>
+              )}
+            </>
+          )}
         </nav>
       </div>
     </header>

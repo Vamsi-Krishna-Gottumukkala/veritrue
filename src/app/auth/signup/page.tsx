@@ -119,16 +119,16 @@ export default function SignUpPage() {
                 />
               </svg>
             </div>
-            <h1 className={styles.title}>Check your email</h1>
+            <h1 className={styles.title}>Account created successfully!</h1>
             <p className={styles.subtitle}>
-              We&apos;ve sent a confirmation link to <strong>{email}</strong>
+              Welcome to VeriTrue, {fullName || email}.
             </p>
             <p className={styles.subtitle} style={{ marginTop: "1rem" }}>
-              Click the link in the email to verify your account and start using
-              VeriTrue.
+              Your account is fully set up and you can now access all
+              verification services.
             </p>
             <Link
-              href="/auth/signin"
+              href="/upload"
               className={styles.submitBtn}
               style={{
                 display: "block",
@@ -137,7 +137,7 @@ export default function SignUpPage() {
                 textDecoration: "none",
               }}
             >
-              Back to Sign In
+              Continue to Upload
             </Link>
           </div>
         </div>

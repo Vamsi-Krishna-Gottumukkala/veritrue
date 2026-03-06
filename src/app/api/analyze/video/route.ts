@@ -1,4 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
+import { pool } from "@/lib/db";
+import { cookies } from "next/headers";
+import jwt from "jsonwebtoken";
+
+const JWT_SECRET =
+  process.env.JWT_SECRET || "fallback_secret_key_change_in_production";
 
 interface VideoAnalysisResult {
   truthScore: number;
@@ -136,6 +142,35 @@ export async function POST(request: NextRequest) {
         },
         summary: `Video analysis: ${mlResult.label} (confidence: ${Math.round(mlResult.confidence * 100)}%). Analyzed ${mlResult.frame_count} frames, ${mlResult.fake_frame_count} flagged as fake.`,
       };
+
+      // Try to save to database if user is authenticated
+      try {
+        const cookieStore = await cookies();
+        const token = cookieStore.get("auth_token")?.value;
+
+        if (token) {
+          let userId;
+          try {
+            const decoded = jwt.verify(token, JWT_SECRET) as any;
+            userId = decoded.userId;
+          } catch (e) {}
+
+          if (userId) {
+            await pool.query(
+              "INSERT INTO analysis_history (user_id, content_type, content_preview, truth_score, verdict) VALUES (?, ?, ?, ?, ?)",
+              [
+                userId,
+                "video",
+                `Video uploaded (${file.name})`,
+                analysis.truthScore,
+                analysis.verdict,
+              ],
+            );
+          }
+        }
+      } catch (dbError) {
+        console.error("Database error (non-critical):", dbError);
+      }
 
       return NextResponse.json(analysis);
     } catch (mlError) {

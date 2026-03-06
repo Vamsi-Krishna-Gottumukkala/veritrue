@@ -1,8 +1,13 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { NextRequest, NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
 import { computeBERTScore, isBERTScoreAvailable } from "@/lib/bertscore";
 import * as chrono from "chrono-node";
+import { pool } from "@/lib/db";
+import { cookies } from "next/headers";
+import jwt from "jsonwebtoken";
+
+const JWT_SECRET =
+  process.env.JWT_SECRET || "fallback_secret_key_change_in_production";
 
 // Initialize Gemini
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
@@ -554,29 +559,30 @@ export async function POST(request: NextRequest) {
 
     // Try to save to database if user is authenticated
     try {
-      const supabase = await createClient();
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
+      const cookieStore = await cookies();
+      const token = cookieStore.get("auth_token")?.value;
 
-      if (user) {
-        // Save analysis to database
-        await supabase.from("analyses").insert({
-          user_id: user.id,
-          content_type: "text",
-          content_preview: text.substring(0, 200),
-          truth_score: analysis!.truthScore,
-          verdict: analysis!.verdict,
-          detected_issues: analysis!.detectedIssues,
-          fact_verification: analysis!.factVerification,
-          sentiment_analysis: analysis!.sentimentAnalysis,
-          summary: analysis!.summary,
-        });
+      if (token) {
+        let userId;
+        try {
+          const decoded = jwt.verify(token, JWT_SECRET) as any;
+          userId = decoded.userId;
+        } catch (e) {
+          // invalid token
+        }
 
-        // Increment verification count
-        await supabase.rpc("increment_verification_count", {
-          p_user_id: user.id,
-        });
+        if (userId) {
+          await pool.query(
+            "INSERT INTO analysis_history (user_id, content_type, content_preview, truth_score, verdict) VALUES (?, ?, ?, ?, ?)",
+            [
+              userId,
+              "text",
+              text.substring(0, 200),
+              analysis!.truthScore,
+              analysis!.verdict,
+            ],
+          );
+        }
       }
     } catch (dbError) {
       console.error("Database error (non-critical):", dbError);
