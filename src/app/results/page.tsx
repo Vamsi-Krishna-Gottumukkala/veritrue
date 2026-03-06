@@ -173,8 +173,8 @@ export default function ResultsPage() {
         const parsed = JSON.parse(storedResult);
         // Ensure all required fields exist
         const analysis: AnalysisResult = {
-          truthScore: parsed.truthScore || 75,
-          confidenceLevel: parsed.confidenceLevel || parsed.truthScore || 75,
+          truthScore: parsed.truthScore ?? 75,
+          confidenceLevel: parsed.confidenceLevel ?? parsed.truthScore ?? 75,
           verdict: parsed.verdict || "Analysis Complete",
           detectedIssues: parsed.detectedIssues || [],
           factVerification: parsed.factVerification || [],

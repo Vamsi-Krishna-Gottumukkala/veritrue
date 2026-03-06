@@ -2,6 +2,7 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { computeBERTScore, isBERTScoreAvailable } from "@/lib/bertscore";
+import * as chrono from "chrono-node";
 
 // Initialize Gemini
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
@@ -201,15 +202,34 @@ async function performGeminiAnalysis(text: string): Promise<AnalysisResult> {
   console.log("API Key present:", !!process.env.GEMINI_API_KEY);
 
   try {
-    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+    // Initialize model with Google Search Grounding enabled
+    const model = genAI.getGenerativeModel(
+      { model: "gemini-2.5-flash" },
+      { apiVersion: "v1beta" },
+    );
+
+    // Check if tools property exists and add google search tool
+    // @ts-ignore - The types might not reflect the latest beta features
+    model.tools = [{ googleSearch: {} }];
 
     const escapedText = text.replace(/"/g, '\\"');
-    const prompt = `Fact-check this text. Extract each claim and verify as true/false/disputed.
+    const prompt = `You are a fact-checking AI with access to real-time Google Search. Look up current news and verify the claims below. Extract each claim and verify as true/false/disputed based on the latest available web data.
 
 TEXT: "${escapedText}"
 
-Return JSON only:
-{"factVerification":[{"claim":"claim text","status":"true|false|disputed","source":"brief reason"}],"truthScore":0-100,"verdict":"verdict","summary":"1 sentence"}`;
+Return JSON ONLY using exactly this schema:
+{
+  "factVerification": [
+    {
+      "claim": "claim text",
+      "status": "true|false|disputed",
+      "source": "brief reason citing latest news"
+    }
+  ],
+  "truthScore": 0-100,
+  "verdict": "verdict",
+  "summary": "1 sentence explaining analysis based on current events"
+}`;
 
     let result;
     let retryCount = 0;
@@ -269,13 +289,20 @@ Return JSON only:
           status: c.status?.toLowerCase().trim(),
         }),
       );
+
+      // Continue scoring based on claims
+
       const trueClaims = claims.filter(
         (c: { status: string }) => c.status === "true",
       ).length;
       const falseClaims = claims.filter(
         (c: { status: string }) => c.status === "false",
       ).length;
-      const totalClaims = claims.length;
+      const totalClaims =
+        trueClaims +
+        falseClaims +
+        claims.filter((c: { status: string }) => c.status === "disputed")
+          .length;
 
       // ALWAYS calculate score from claims — never trust Gemini's raw score
       let calculatedScore: number;
@@ -346,7 +373,10 @@ Return JSON only:
       }
 
       return {
-        truthScore: calculatedScore,
+        truthScore:
+          typeof parsed.truthScore === "number"
+            ? parsed.truthScore
+            : calculatedScore,
         confidenceLevel: Math.min(95, calculatedScore + 5),
         verdict,
         detectedIssues,
@@ -391,9 +421,48 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Try ML model first, then Gemini fallback
     console.log("=== TEXT ANALYSIS REQUEST ===");
     console.log("Text length:", text.length);
+
+    // --- PHASE 12: Future Event Detection ---
+    console.log("Scanning for dates...");
+    const parsedDates = chrono.parse(text);
+    const now = new Date();
+
+    // Give a 1-day buffer for timezone differences
+    const tomorrow = new Date(now);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+
+    const futureDates = parsedDates.filter((result) => {
+      const date = result.start.date();
+      return date > tomorrow;
+    });
+
+    if (futureDates.length > 0) {
+      console.log("Future dates detected! Short-circuiting analysis.");
+      const futureDateStr = futureDates[0].start.date().toLocaleDateString();
+
+      const futureIssue = {
+        truthScore: 0,
+        confidenceLevel: 100,
+        verdict: "Future Event / Invalid Claim",
+        detectedIssues: [
+          {
+            text: `The text mentions events occurring on or around ${futureDateStr}, which is in the future. We cannot fact-check events that have not yet happened.`,
+            severity: "high" as const,
+          },
+        ],
+        factVerification: [],
+        sentimentAnalysis: {
+          tone: "Speculative",
+          emotionalLanguage: [],
+          capsUsage: 0,
+        },
+        summary: `Analysis aborted because the text describes future events (${futureDateStr}).`,
+      };
+
+      return NextResponse.json(futureIssue);
+    }
 
     let analysis: AnalysisResult;
     let usedMLModel = false;
