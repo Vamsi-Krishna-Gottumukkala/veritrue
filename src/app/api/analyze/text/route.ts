@@ -470,90 +470,22 @@ export async function POST(request: NextRequest) {
     }
 
     let analysis: AnalysisResult;
-    let usedMLModel = false;
 
-    // Step 1: Try Python ML Service
-    try {
-      console.log("Trying ML model at http://localhost:8000...");
-      const mlResponse = await fetch("http://localhost:8000/predict/text", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text }),
-        signal: AbortSignal.timeout(10000),
-      });
-
-      if (mlResponse.ok) {
-        const mlResult = await mlResponse.json();
-        console.log("ML model result:", JSON.stringify(mlResult));
-
-        if (mlResult.confidence >= 0.65) {
-          // ML model is confident — use its result
-          const isFake = mlResult.label === "fake";
-          const truthScore = isFake
-            ? Math.round((1 - mlResult.confidence) * 100)
-            : Math.round(mlResult.confidence * 100);
-
-          analysis = {
-            truthScore,
-            confidenceLevel: Math.round(mlResult.confidence * 100),
-            verdict: isFake ? "Likely Fake/Manipulated" : "Verified",
-            detectedIssues: isFake
-              ? [
-                  {
-                    text: `ML model classified this as fake news with ${Math.round(mlResult.confidence * 100)}% confidence`,
-                    severity: "high" as const,
-                  },
-                ]
-              : [
-                  {
-                    text: `ML model classified this as real news with ${Math.round(mlResult.confidence * 100)}% confidence`,
-                    severity: "low" as const,
-                  },
-                ],
-            factVerification: [],
-            sentimentAnalysis: {
-              tone: isFake ? "Potentially Misleading" : "Factual",
-              emotionalLanguage: [],
-              capsUsage: 0,
-            },
-            summary: `ML model analysis: ${mlResult.label} (confidence: ${Math.round(mlResult.confidence * 100)}%). Probabilities: fake=${Math.round((mlResult.probabilities?.fake || 0) * 100)}%, real=${Math.round((mlResult.probabilities?.real || 0) * 100)}%.`,
-          };
-          usedMLModel = true;
-          console.log(
-            "Using ML model result. Truth score:",
-            analysis.truthScore,
-          );
-        } else {
-          console.log(
-            `ML confidence too low (${mlResult.confidence}), falling back to Gemini`,
-          );
-        }
-      }
-    } catch (mlError) {
-      console.log(
-        "ML service unavailable, falling back to Gemini:",
-        mlError instanceof Error ? mlError.message : mlError,
+    if (
+      !process.env.GEMINI_API_KEY ||
+      process.env.GEMINI_API_KEY === "your_gemini_api_key_here"
+    ) {
+      return NextResponse.json(
+        {
+          error:
+            "Gemini API is not available. Please check your environment variables.",
+        },
+        { status: 500 },
       );
     }
 
-    // Step 2: Gemini fallback if ML model wasn't used
-    if (!usedMLModel) {
-      if (
-        !process.env.GEMINI_API_KEY ||
-        process.env.GEMINI_API_KEY === "your_gemini_api_key_here"
-      ) {
-        return NextResponse.json(
-          {
-            error:
-              "Neither ML service nor Gemini API is available. Start the ML service with: cd ml_service && python app.py",
-          },
-          { status: 500 },
-        );
-      }
-
-      console.log("Using Gemini API for analysis");
-      analysis = await performGeminiAnalysis(text);
-    }
+    console.log("Using Gemini API for analysis");
+    analysis = await performGeminiAnalysis(text);
 
     console.log("Analysis complete. Truth score:", analysis!.truthScore);
 

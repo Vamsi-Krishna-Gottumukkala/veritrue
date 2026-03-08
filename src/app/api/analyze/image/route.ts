@@ -68,100 +68,27 @@ export async function POST(request: NextRequest) {
     const base64Image = Buffer.from(buffer).toString("base64");
 
     let analysis: ImageAnalysisResult;
-    let usedMLModel = false;
 
-    // Step 1: Try Python ML Service
-    try {
-      console.log("Trying ML image model at http://localhost:8000...");
-      const mlFormData = new FormData();
-      mlFormData.append("file", file);
-
-      const mlResponse = await fetch("http://localhost:8000/predict/image", {
-        method: "POST",
-        body: mlFormData,
-        signal: AbortSignal.timeout(15000),
-      });
-
-      if (mlResponse.ok) {
-        const mlResult = await mlResponse.json();
-        console.log("ML image result:", JSON.stringify(mlResult));
-
-        if (mlResult.confidence >= 0.7) {
-          const isFake = mlResult.label === "fake";
-          const truthScore = isFake
-            ? Math.round((1 - mlResult.confidence) * 100)
-            : Math.round(mlResult.confidence * 100);
-
-          analysis = {
-            truthScore,
-            confidenceLevel: Math.round(mlResult.confidence * 100),
-            verdict: isFake ? "AI-Generated / Fake Image" : "Authentic Image",
-            detectedIssues: isFake
-              ? [
-                  {
-                    text: `ML model detected this as a fake/AI-generated image (${Math.round(mlResult.confidence * 100)}% confidence)`,
-                    severity: "high" as const,
-                  },
-                ]
-              : [
-                  {
-                    text: `ML model classified this as a real image (${Math.round(mlResult.confidence * 100)}% confidence)`,
-                    severity: "low" as const,
-                  },
-                ],
-            factVerification: [],
-            metadata: {
-              format: file.type,
-              fileSize: file.size,
-              hasExif: false,
-            },
-            sentimentAnalysis: {
-              tone: isFake ? "AI-Generated Content" : "Authentic",
-              emotionalLanguage: [],
-              capsUsage: 0,
-            },
-            summary: `ML model analysis: ${mlResult.label} (confidence: ${Math.round(mlResult.confidence * 100)}%). Probabilities: fake=${Math.round((mlResult.probabilities?.fake || 0) * 100)}%, real=${Math.round((mlResult.probabilities?.real || 0) * 100)}%.`,
-          };
-          usedMLModel = true;
-          console.log(
-            "Using ML image result. Truth score:",
-            analysis.truthScore,
-          );
-        } else {
-          console.log(
-            `ML image confidence too low (${mlResult.confidence}), falling back to Gemini`,
-          );
-        }
-      }
-    } catch (mlError) {
-      console.log(
-        "ML image service unavailable:",
-        mlError instanceof Error ? mlError.message : mlError,
+    if (
+      !process.env.GEMINI_API_KEY ||
+      process.env.GEMINI_API_KEY === "your_gemini_api_key_here"
+    ) {
+      return NextResponse.json(
+        {
+          error:
+            "Gemini API is not available. Please check your environment variables.",
+        },
+        { status: 500 },
       );
     }
 
-    // Step 2: Gemini fallback
-    if (!usedMLModel) {
-      if (
-        !process.env.GEMINI_API_KEY ||
-        process.env.GEMINI_API_KEY === "your_gemini_api_key_here"
-      ) {
-        return NextResponse.json(
-          {
-            error:
-              "Neither ML service nor Gemini API is available. Start the ML service with: cd ml_service && python app.py",
-          },
-          { status: 500 },
-        );
-      }
-
-      analysis = await performGeminiVisionAnalysis(
-        base64Image,
-        file.type,
-        bytes,
-        file.size,
-      );
-    }
+    console.log("Using Gemini Vision API for image analysis");
+    analysis = await performGeminiVisionAnalysis(
+      base64Image,
+      file.type,
+      bytes,
+      file.size,
+    );
 
     // Save to DB if authenticated
     try {
